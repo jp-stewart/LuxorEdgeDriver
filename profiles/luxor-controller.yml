@@ -1,0 +1,44 @@
+name: luxor-controller
+components:
+  - id: main
+    capabilities:    
+      - id: refresh
+        version: 1
+    categories:
+      - name: Switch
+  - id: allOn
+    label: 'All On'
+    capabilities:
+      - id: momentary
+        version: 1
+      - id: refresh
+        version: 1
+    categories:
+      - name: Switch
+  - id: allOff
+    label: 'All Off'
+    capabilities:
+      - id: momentary
+        version: 1
+      - id: refresh
+        version: 1
+    categories:
+      - name: Switch
+preferences:
+  - title: "Controller IP Address"
+    name: controller
+    description: "Controller IP Address"
+    required: true
+    preferenceType: string
+    definition:
+      stringType: text
+      minLength: 7
+      maxLength: 15
+      default: "192.168.1.xxx"
+  - title: "Spawn New Controller Device"
+    name: duplicate
+    description: "Toggle on, and then off to spawn another controller device"
+    required: true
+    preferenceType: boolean
+    definition:
+      default: false
