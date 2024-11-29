@@ -1,0 +1,6 @@
+name: 'Luxor Controller'
+packageKey: 'luxor-controller'
+description: 'FX Luminaire Luxor Edge Driver'
+permissions:
+  lan: {}
+  discovery: {}
