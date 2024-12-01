@@ -414,13 +414,15 @@ local function create_controller(driver)
 
   log.info("Creating a controller")
 
+  local device_list = driver:get_devices()
+
   local MFG_NAME = 'JP Edge Drivers'
-  local VEND_LABEL = string.format('Luxor Controller %d', driver.controller_counter)
+  local VEND_LABEL = string.format('Luxor Controller %d', #device_list)
   local MODEL = 'luxor-controller'
   local ID = 'luxor-controller' .. '-' .. socket.gettime()
   local PROFILE = 'luxor-controller'
 
-  if driver.controller_counter == 0 then
+  if #device_list == 0 then
     VEND_LABEL = "Luxor Controller"
   end
 
@@ -439,7 +441,6 @@ local function create_controller(driver)
   local result = assert (driver:try_create_device(create_device_msg), "failed to create luxor controller")
 
   if result ~= false then
-    driver.controller_counter = driver.controller_counter + 1
     driver.initialized = true
   else
     log.debug ("Luxor Controller Creation Failed")
@@ -802,15 +803,18 @@ local function device_added (driver, device)
     end
   
     device:online()
+    driver.initialized = true
 
   end
 
   if device.model == "luxor-controller" then
     device:online()
+    driver.initialized = true
   end
 
   if device.model == "luxor-factory" then
     device:online()
+    driver.initialized = true
   end
 
 end
@@ -850,7 +854,11 @@ end
 
 local function handler_driverchanged(driver, device, event, args)
 
-log.debug ('*** Driver changed handler invoked *** - ' .. device:pretty_print() .. ' - event:' .. json.encode(event) .. ' - args:' .. json.encode(args))
+  log.debug ('*** Driver changed handler invoked *** - ' .. device:pretty_print() .. ' - event:' .. json.encode(event) .. ' - args:' .. json.encode(args))
+
+  local device_list = driver:get_devices()
+
+  driver.initialized = (#device_list > 0)
 
 end
 
@@ -859,6 +867,9 @@ local function shutdown_handler(driver, event)
 
   log.debug ('*** Driver shutdown invoked *** - ' .. json.encode(event))
 
+  local device_list = driver:get_devices()
+
+  driver.initialized = (#device_list > 0)
 end
 
 
@@ -925,7 +936,6 @@ local luxor_controller_template = {
     }
   },
   initialized = false,
-  controller_counter = 0,
   device_from_netId = function(self, networkId)
     if self.datastore.device_network_id == nil then return nil end
     local deviceId = self.datastore.netId_to_deviceId[networkId]
