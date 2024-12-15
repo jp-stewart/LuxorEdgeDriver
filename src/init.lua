@@ -16,7 +16,7 @@ local luxor_driver = {}
 
 -- ****************************************
 -- *
--- * Network & HTTP functions
+-- * Network, HTTP, & Utility functions
 -- *
 -- ****************************************
 
@@ -40,89 +40,80 @@ local function validate_ip_address(ipAddress)
 
 end
 
--- convert headers into a table format from a starting table or from csv
-local function convertHeaders(inputHeaders)
+local function backOff(controllerDevice)
 
-  local found_accept = false
-  local headers = {}
+  local delay = 1.2
+  local currentValue = controllerDevice:get_field("backOff")
 
-  if inputHeaders then
-    
-    local tempTable = {}
-    
-    -- support headers provided either by a table or by csv string
-    if (#inputHeaders >= 1 and inputHeaders:find(',',1,true) == nil) then
-      tempTable = inputHeaders
-    elseif inputHeaders:find(',',1,true) >= 1 then
-      for row in string.gmatch(inputHeaders, '([^,]+)') do
-        table.insert(tempTable, row);
-      end
-    end
-    
-    for _, header in ipairs(tempTable) do
-      local key, value = header:match('([^=]+)=([^=]+)$')
-      key = key:gsub("%s+", "")
-      value = value:match'^%s*(.*)'
-      if key and value then
-        headers[key] = value
-        if string.lower(key) == 'accept' then found_accept = true end
-      end
-    end
+
+  if (currentValue == nil) then
+    currentValue = 0
   end
-  
-  if not found_accept then
-    headers["Accept"] = '*/*'
+
+  currentValue = currentValue + delay
+  controllerDevice:set_field("backOff",currentValue)
+
+  controllerDevice.thread:call_with_delay(delay,function() 
+    local updateValue = controllerDevice:get_field("backOff")
+    updateValue = updateValue - delay
+    if (updateValue < 0) then
+      updateValue = 0
+    end
+    controllerDevice:set_field("backOff",updateValue)
+   end )
+
+  return currentValue
+
+end
+
+local function initializeDriver(driver, value)
+
+  log.info(string.format("Initialize Driver called requesting value: <%s>",value))
+
+  if (value == nil or value == true) then
+    driver.datastore["initialized"] = true;
+  else
+    driver.datastore["initialized"] = false;
   end
-  
-  return headers
+end
+
+local function isInitialized(driver)
+
+  local driverInitialized = driver.datastore["initialized"]
+  local deviceCount = driver:get_devices()
+
+  log.info(string.format("Checking Driver Initialization. Value: <%s> Device Count: <%d>",driverInitialized,#deviceCount))
+
+  if (driverInitialized == nil or driverInitialized == false) then
+    return false
+  end
+
+  if (#deviceCount == 0) then
+    log.warn("Driver reports initialized but there are zero devices // overriding result and setting initialized to false.")
+    initializeDriver(driver,false)
+    return false
+  end
+
+  return true
 end
 
 -- Send http or https request and emit response, or handle errors
-local function http_request(method, url, requestBody, addedHeaders)
+local function http_request(url, requestBody)
 
   local responsechunks = {}
+  local sendheaders = {}
   local body, code, headers, status
   
-  local protocol = url:match('^(%a+):')
-  
-  local sendheaders = convertHeaders(addedHeaders)
+  url = url:gsub("%s", "%%20")
+
+  sendheaders["Content-Type"] = "application/json"
   
   if requestBody then
+    
     sendheaders["Content-Length"] = string.len(requestBody)
-  end
-  
-  -- replace spaces with '%20'
-  url = url:gsub("%s", "%%20")
-  
-  if protocol == 'https' and requestBody then
-  
-    body, code, headers, status = https.request{
-      method = method,
-      url = url,
-      headers = sendheaders,
-      protocol = "any",
-      options =  {"all"},
-      verify = "none",
-      source = ltn12.source.string(requestBody),
-      sink = ltn12.sink.table(responsechunks)
-     }
-
-  elseif protocol == 'https' then
-  
-    body, code, headers, status = https.request{
-      method = method,
-      url = url,
-      headers = sendheaders,
-      protocol = "any",
-      options =  {"all"},
-      verify = "none",
-      sink = ltn12.sink.table(responsechunks)
-     }
-
-  elseif protocol == 'http' and requestBody then
 
     body, code, headers, status = http.request{
-      method = method,
+      method = 'POST',
       url = url,
       headers = sendheaders,
       source = ltn12.source.string(requestBody),
@@ -132,7 +123,7 @@ local function http_request(method, url, requestBody, addedHeaders)
   else
 
     body, code, headers, status = http.request{
-      method = method,
+      method = 'POST',
       url = url,
       headers = sendheaders,
       sink = ltn12.sink.table(responsechunks)
@@ -147,7 +138,6 @@ local function http_request(method, url, requestBody, addedHeaders)
   local returnstatus = 'unknown'
   local httpcode_str
   local httpcode_num
-  protocol = string.upper(protocol)
   
   if type(code) == 'number' then
     httpcode_num = code
@@ -160,11 +150,36 @@ local function http_request(method, url, requestBody, addedHeaders)
       returnstatus = 'OK'
       log.debug (string.format('Response:\n>>>%s<<<', response))
       
-      return response      
+      return response
+    elseif httpcode_num == 1 then
+      returnstatus = "Unknown Method"
+    elseif httpcode_num == 101 then
+      returnstatus = "Unparseable Request"
+    elseif httpcode_num == 102 then
+      returnstatus = "Invalid Request"
+    elseif httpcode_num == 151 then
+      returnstatus = "Color Value Out of Range"
+    elseif httpcode_num == 201 then
+      returnstatus = "Precondition Failed"
+    elseif httpcode_num == 202 then
+      returnstatus = "Group Name In Use"
+    elseif httpcode_num == 205 then
+      returnstatus = "Group Number In Use"
+    elseif httpcode_num == 241 then
+      returnstatus = "Item Does Not Exist"
+    elseif httpcode_num == 242 then
+      returnstatus = "Bad Group Number"
+    elseif httpcode_num == 243 then
+      returnstatus = "Theme Index Out Of Range"
+    elseif httpcode_num == 251 then
+      returnstatus = "Bad Theme Index"
+    elseif httpcode_num == 252 then
+      returnstatus = "Theme Changes Restricted"
     else
-      log.warn (string.format("HTTP %s request to %s failed with http code %s, status: %s", method, url, tostring(httpcode_num), status))
-      returnstatus = 'Failed'
+      returnstatus = 'Unknown Failure'
     end
+    
+    log.warn (string.format("HTTP request to %s failed with http code %s, status: %s -- Error: %s", url, tostring(httpcode_num), status, returnstatus))
   
   else
     
@@ -179,7 +194,7 @@ local function http_request(method, url, requestBody, addedHeaders)
         log.warn("HTTP request timed out: ", url)
         returnstatus = "Timeout"
       else
-        log.error (string.format("HTTP %s request to %s failed with code: %s, status: %s", method, url, httpcode_str, status))
+        log.error (string.format("HTTP request to %s failed with code: %s, status: %s", url, httpcode_str, status))
         returnstatus = 'Failed'
       end
     else
@@ -193,49 +208,79 @@ local function http_request(method, url, requestBody, addedHeaders)
   
 end
 
-
--- TODO
--- protected getStatus(result): string {
---   switch (result) {
---     case 0:
---       return ('Ok'); //StatusOk
---     case (1):
---       return ('Unknown Method'); //StatusUnknownMethod
---     case (101):
---       return ('Unparseable Request'); //StatusUnparseableRequest
---     case (102):
---       return ('Invalid Request'); //StatusInvalidRequest
---     case (151):
---       return ('Color Value Out of Range');
---     case (201):
---       return ('Precondition Failed'); //StatusPreconditionFailed
---     case (202):
---       return ('Group Name In Use'); //StatusGroupNameInUse
---     case (205):
---       return ('Group Number In Use'); //StatusGroupNumberInUse
---     case (241):
---       return ('Item Does Not Exist'); //StatusThemeIndexOutOfRange
---     case (242):
---       return ('Bad Group Number'); //StatusThemeIndexOutOfRange
---     case (243):
---       return ('Theme Index Out Of Range'); //StatusThemeIndexOutOfRange
---     case (251):
---       return ('Bad Theme Index'); //StatusThemeIndexOutOfRange
---     case (252):
---       return ('Theme Changes Restricted'); //StatusThemeIndexOutOfRange
---     default:
---       return ('Unknown status');
---   }
--- }
-
-
 -- ****************************************
 -- *
 -- * Controller Group Logic & Functions
 -- *
 -- ****************************************
 
-local function create_group_switch(driver, name, groupNum, level, address)
+local function updateGroupState(device, name, number, level)
+
+  --Check for whether name has changed.
+  if (device.vendor_provided_label ~= name) then
+    device:try_update_metadata({vendor_provided_label = name})
+  end
+
+  if (device.label ~= name) then
+    device:try_update_metadata({label = name})
+  end
+
+  if level == 0 then
+    device:emit_event(capabilities.switch.switch('off'))
+  else
+    device:emit_event(capabilities.switchLevel.level(level))
+    device:emit_event(capabilities.switch.switch('on'))
+  end
+
+  --Update/refresh stored device data
+  device:set_field('Name', name, { ['persist'] = true })
+  device:set_field('group', number, { ['persist'] = true })
+  device:set_field('isOn', (level > 0), { ['persist'] = true })
+  device:set_field('switchLevel', level, { ['persist'] = true })
+
+end
+
+--NOTE/WARNING, smartthings function device:get_child_by_parent_assigned_key does not work at all in my experience.
+--              The root cause is not entirely clear, however I was never able to "see" parent_assigned_key set on child devices when passed in via metadata.
+--              Because of this, I had to create this function, and also thread/time delay updating/setting of the switch values during refresh.
+--              Its not elegant, since every switch goes through this for-loop. A TODO item would be to store the child drivers in the controller persistent store
+--              however, that also requires lifecycle management of those entries as well. This method does not.
+local function findChildByNetId(parent,netId)
+
+  log.info(string.format("Find child by NetId. Parent: %s Child Net Id to find: %s",parent.device_network_id,netId))
+
+  local child_list = parent:get_child_list()
+
+  if (child_list == nil or #child_list == 0) then
+    log.error(parent.device_network_id .. " has no children.")
+    return
+  end
+
+  for i,child in ipairs(child_list) do
+    if (child.device_network_id == netId) then
+      log.info(string.format("Matching network id found, returning: %s - %s",child.device_network_id,child.label))
+      return child
+    else
+      log.info(string.format("Network id does not match: %s - %s",child.device_network_id,child.label))
+    end
+  end
+
+end
+
+local function find_and_update_group_switch(controller,label,groupNum,level)
+
+  local key = string.format("luxor-group-%s-%d",controller.preferences.controller,groupNum)
+  local newDevice = findChildByNetId(controller,key)
+
+  if (newDevice ~= nil) then
+      controller.thread:queue_event(updateGroupState,newDevice,label,groupNum,level)
+  else
+      log.error(string.format("Error finding new device by id: <%s> after creating group switch: <%s>. Controller: <%s> Group: <%s> Level: <%s>",key,label,controller.preferences.controller,groupNum, level))
+  end
+
+end
+
+local function create_group_switch(driver, parent, name, groupNum, level, address)
 
   log.info(string.format("Creating a group switch Controller:<%s> Group:<%s> Number:<%d> Level:<%s>", address, name, groupNum, level))
 
@@ -244,12 +289,9 @@ local function create_group_switch(driver, name, groupNum, level, address)
   local MODEL = 'luxor-group'
   local ID = 'luxor-group' .. '-' .. address .. '-' .. groupNum
   local PROFILE = 'luxor-group'
+  local KEY = string.format("group-%d",groupNum)
 
-  log.debug("storing group values in datastore for initialization")
-
-  driver:fill_group_switch_cache(ID, address, name, groupNum, level)
-
-  log.debug (string.format('Creating additional device: label=<%s>, id=<%s>', VEND_LABEL, ID))
+  log.debug (string.format('Creating additional device: label=<%s>, id=<%s>, key=<%s>', VEND_LABEL, ID, KEY))
 
   local create_device_msg = {
                               type = "LAN",
@@ -258,12 +300,18 @@ local function create_group_switch(driver, name, groupNum, level, address)
                               profile = PROFILE,
                               manufacturer = MFG_NAME,
                               model = MODEL,
-                              vendor_provided_label = VEND_LABEL
+                              vendor_provided_label = VEND_LABEL,
+                              parent_device_id = parent.id,
+                              parent_assigned_child_key = VEND_LABEL, --KEY,
+                              external_id = tostring(groupNum),
+                              level_value = tostring(level)
                             }
 
   local success = assert (driver:try_create_device(create_device_msg), "failed to create luxor group switch")
 
   if success ~= false then
+    
+    parent.thread:call_with_delay(3,function() find_and_update_group_switch(parent,VEND_LABEL,groupNum,level) end )
 
   else
     log.debug ("try create group switch failed")
@@ -272,51 +320,44 @@ local function create_group_switch(driver, name, groupNum, level, address)
 
 end
 
+local function enumerate_groups(driver, device)
 
-local function enumerate_groups(driver, device, address, refresh, bypass)
-
-  local pending_request = device:get_field("PendingRequest")
-  local request_delay = device:get_field("RequestDelay")
-
-  if pending_request and bypass == nil then return end
-
-  device:set_field("PendingRequest",true)
-
-  if (request_delay > 0 and bypass == nil) then
-    request_delay = request_delay + 1.2    
-    device:set_field('RequestDelay', request_delay, { ['persist'] = true })
-    log.debug("Delaying enumerate_groups by " .. request_delay .. " seconds")
-    driver:call_with_delay(request_delay,function() enumerate_groups(driver, device, address, refresh, true) end )    
+  if (device.model ~= "luxor-controller" or device.preferences.controller == '192.168.1.xxx' or not validate_ip_address(device.preferences.controller)) then
     return
-  elseif bypass == nil then
-    request_delay = request_delay + 1.2    
-    device:set_field('RequestDelay', request_delay, { ['persist'] = true })
   end
 
-  driver:call_with_delay(1.2, function()
-    request_delay = device:get_field("RequestDelay")
-    if (request_delay >= 1.2) then
-      request_delay = request_delay - 1.2
-    else
-      request_delay = 0
-    end
-    device:set_field('RequestDelay', request_delay, { ['persist'] = true })
-    log.debug("request_delay: " .. request_delay)
-  end)
+  -- Cannot overload the controller web server
+  local http_underway = device:get_field("http_underway")
+  if (http_underway ~= nil and http_underway == true) then
+    -- try again incremental time
+    local backofftime = backOff(device)
+    log.info(string.format("Controller Busy - Delaying Enumeration by %f seconds", backofftime))
+    device.thread:call_with_delay(backofftime,function() enumerate_groups(driver,device) end )
+    return
+  end
 
-  log.info(string.format("Enumerating Lighting Groups at: <%s> Refresh: <%s>", address, refresh))
+  device:set_field("http_underway",true)
 
-  driver.lastRefresh = os.time()
+  local timeStamp = os.time()
 
-  local req_url = string.format("http://%s/GroupListGet.json",address)
+  device:set_field("lastRefresh",timeStamp)
 
-  local result = http_request('POST',req_url)
+  log.info(string.format("Enumerating Lighting Groups at: <%s> - Time: <%s>", device.preferences.controller, timeStamp))
+
+
+  local req_url = string.format("http://%s/GroupListGet.json",device.preferences.controller)
+
+  local result = http_request(req_url)
 
   local rtable, pos, err
 
-  device:set_field("PendingRequest",false)
+  --Clear the pending request in 1s
 
-  if result:find('{', 1, true) == 1 then
+  device.thread:call_with_delay(1,function() 
+    device:set_field("http_underway",false)
+  end)
+
+  if result:find('{', 1, true) == 1 then -- Check for json indicator in the return string
   
     log.debug ('Parsing response for groups')
 
@@ -335,67 +376,26 @@ local function enumerate_groups(driver, device, address, refresh, bypass)
 
   log.debug(string.format("Table Entries: <#%d>", #rtable.GroupList))
 
-  if #rtable.GroupList >= 1 then
-    
-    local currentdevices = driver:get_devices()
+  if #rtable.GroupList >= 1 then    
     
     for i,group in next,rtable.GroupList do
+
+      local key = string.format("group-%d",group.Grp)
       
       log.debug(string.format("Enumerating group switch for group: <%s> Num:<#%d> Level:<#%d>", group.Name, group.Grp, group.Inten))
 
-      local nodevicefound = true
+      log.debug(string.format("Searching children for existing group by Key: %s",key))
 
-      log.debug(string.format("Searching existing groups for matches. %d",#currentdevices))
+      local lookupKey = string.format("luxor-group-%s-%d",device.preferences.controller,group.Grp)
+      local childDevice = findChildByNetId(device,lookupKey)
 
-      for k,search in next,currentdevices do
-        
-        log.debug(k .. " - " ..  search.id .. " - " .. search.model .. " - " .. search.label)
+      if (childDevice == nil) then
+        log.warn(string.format("No match for: %s found as a child. Creating new device.",lookupKey))
+        device.thread:queue_event(create_group_switch,driver, device, group.Name, group.Grp, group.Inten, device.preferences.controller)
+      else
+        log.debug(string.format("Match found. Updating values. Controller: %s Group: %d Name: %s Level %d", device.preferences.controller, group.Grp, group.Name, group.Inten))
 
-        if search.model == "luxor-group" and search:get_field("Controller") == address and search:get_field("Num") == group.Grp then
-
-          log.debug(string.format("Match found. Updating values. k: %s Controller: %s Group: %d Name: %s Level %d", k, address, group.Grp, group.Name, group.Inten))
-
-          nodevicefound = false
-
-          --Report on test results here
-
-          local testdevice = driver:device_from_netId('luxor-group' .. '-' .. address .. '-' .. group.Grp)
-
-          if (testdevice ~= nil and testdevice.id == search.id) then
-            log.debug("Test for device_from_netId succeeded!")
-          else
-            log.warn("Test for device_from_netId failed!")
-          end
-
-          --Check for whether name has changed.
-
-          if (search.vendor_provided_label ~= group.Name) then
-            search:try_update_metadata({vendor_provided_label = group.Name})
-          end
-
-          if (search.label ~= group.Name) then
-            search:try_update_metadata({label = group.Name})
-          end
-
-          --Check whether level has changed
-
-          if (search:get_field('Level') ~= group.Inten) then
-            if group.Inten == 0 then
-              search:emit_event(capabilities.switch.switch('off'))
-            else
-              search:emit_event(capabilities.switchLevel.level(group.Inten))
-              search:emit_event(capabilities.switch.switch('on'))
-            end
-          end
-
-          search:set_field('Name', group.Name, { ['persist'] = true })
-          search:set_field('Level', group.Inten, { ['persist'] = true })
-
-        end
-      end
-
-      if nodevicefound and refresh ~= true then
-        create_group_switch(driver, group.Name, group.Grp, group.Inten, address)
+        device.thread:queue_event(updateGroupState,childDevice, group.Name, group.Grp, group.Inten)
       end
 
     end
@@ -404,9 +404,60 @@ local function enumerate_groups(driver, device, address, refresh, bypass)
 
 end
 
+local function timerFunction(driver, device)
+
+  if device.model ~= "luxor-controller" or device.preferences.controller == '192.168.1.xxx' or not validate_ip_address(device.preferences.controller) then
+    log.warn(string.format("Controller Address not set OR Non-controller device calling timer function! Addres: <%s> Device Model: <%s> Id: <%s>",device.preferences.controller,device.model, device.device_network_id))
+    return
+  end
+
+  local currentTime = os.time()
+  local lastRefresh = device:get_field('lastRefresh')
+  if (lastRefresh == nil) then lastRefresh = currentTime end
+
+  local timeSince = os.difftime(currentTime,lastRefresh)
+
+  log.debug(string.format("Controller Refresh Timer: <%s> -- Controller: <%s> -- time:<%s> lastRefresh:<%s> diff:<%d>", 
+    device.device_network_id, device.preferences.controller,
+    currentTime, lastRefresh, timeSince ))
+
+  device.thread:queue_event(enumerate_groups, driver, device)
+  
+end
+
+local function serialHttpRequestNoReturn(driver, controllerDevice, url,optionalBody)
+
+  if controllerDevice.model ~= "luxor-controller" or controllerDevice.preferences.controller == '192.168.1.xxx' then
+    log.warn(string.format("Controller Address not set OR Non-controller device calling serialHttpRequestNoReturn function! Addres: <%s> Device Model: <%s> Id: <%s>",controllerDevice.preferences.controller,controllerDevice.model, controllerDevice.device_network_id))
+    return
+  end
+
+  local checkUnderway = controllerDevice:get_field("http_underway")
+
+  if (checkUnderway ~= nil and checkUnderway == true) then
+    local backofftime = backOff(controllerDevice)
+
+    controllerDevice.thread:call_with_delay(backofftime,function() 
+      controllerDevice.thread:queue_event(serialHttpRequestNoReturn, driver, controllerDevice, url, optionalBody)
+    end)
+    return
+  end
+
+  controllerDevice:set_field("http_underway",true)
+
+  http_request(url, optionalBody)
+
+  controllerDevice.thread:call_with_delay(1,function() 
+    controllerDevice:set_field("http_underway",false)
+
+    controllerDevice.thread:queue_event(timerFunction, driver, controllerDevice)
+  end)
+
+end
+
 -- ****************************************
 -- *
--- * Creating Factory and Controller devices
+-- * Creating Controller device and Discovery Handler
 -- *
 -- ****************************************
 
@@ -417,16 +468,16 @@ local function create_controller(driver)
   local device_list = driver:get_devices()
 
   local MFG_NAME = 'JP Edge Drivers'
-  local VEND_LABEL = string.format('Luxor Controller %d', #device_list)
+  local VEND_LABEL = "Luxor Controller" 
   local MODEL = 'luxor-controller'
   local ID = 'luxor-controller' .. '-' .. socket.gettime()
   local PROFILE = 'luxor-controller'
 
-  if #device_list == 0 then
-    VEND_LABEL = "Luxor Controller"
+  if #device_list > 0 then
+    VEND_LABEL = string.format('%s %d', VEND_LABEL, #device_list)
   end
 
-  log.debug (string.format('Creating additional device: label=<%s>, id=<%s>', VEND_LABEL, ID))
+  log.debug (string.format('Creating luxor controller device: label=<%s>, id=<%s>, Device Count:<%d>', VEND_LABEL, ID, #device_list))
 
   local create_device_msg = {
                               type = "LAN",
@@ -441,7 +492,7 @@ local function create_controller(driver)
   local result = assert (driver:try_create_device(create_device_msg), "failed to create luxor controller")
 
   if result ~= false then
-    driver.initialized = true
+    initializeDriver(driver)
   else
     log.debug ("Luxor Controller Creation Failed")
     log.debug (result)
@@ -449,10 +500,11 @@ local function create_controller(driver)
    
 end
 
-
 local function discovery_handler(driver, _, should_continue)
 
-  if not driver.initialized then
+  local driverInitialized = isInitialized(driver)
+
+  if not driverInitialized then
 
     log.info("Creating new Luxor Controller")
 
@@ -461,7 +513,7 @@ local function discovery_handler(driver, _, should_continue)
     log.debug("Exiting device creation")
 
   else
-    log.info ('luxor controller factory already created')
+    log.info ('At least one luxor controller exists -- spawn new controller from settings')
   end
 
 end
@@ -472,106 +524,56 @@ end
 -- *
 -- ****************************************
 
-local function queued_on(driver, device, command, bypass)
+local function queued_on(driver, device, command)
   
-  local request_delay = device:get_field("RequestDelay")
-
-  if (request_delay > 0 and bypass == nil) then
-    request_delay = request_delay + 1.2
-    device:set_field('RequestDelay', request_delay, { ['persist'] = true })
-    log.debug("Delaying handle_on by " .. request_delay .. " seconds")
-    device.thread:call_with_delay(request_delay,function() queued_on(driver, device, command, true) end )    
-    return
-  elseif bypass == nil then
-    request_delay = request_delay + 1.2    
-    device:set_field('RequestDelay', request_delay, { ['persist'] = true })
-  end
-
-  device.thread:call_with_delay(1.2, function()
-    request_delay = device:get_field("RequestDelay")
-    if (request_delay >= 1.2) then
-      request_delay = request_delay - 1.2
-    else
-      request_delay = 0
-    end
-    device:set_field('RequestDelay', request_delay, { ['persist'] = true })
-    log.debug("request_delay: " .. request_delay)
-  end)
-
-  log.debug (string.format('On Button: device=<%s>, command=<%s>, delay=<%f>', device, command, request_delay))
+  log.debug (string.format('On Button: device=<%s>, command=<%s>', device, json.encode(command)))
 
   if device.model == "luxor-group" then
-    local name = device:get_field('Name')
-    local level = device:get_field('Level')
-    local groupNum = device:get_field('Num')
-    local controller = device:get_field("Controller")
+    local parent = device:get_parent_device()
+
+    local name = device.label
+    local groupNum = device:get_field('group')
+    local address = parent.preferences.controller
+    local level = device:get_field('switchLevel')
 
     if level == 0 then
       level = 100
-      device:emit_event(capabilities.switchLevel.level(level))
-      device:set_field('Level', level, { ['persist'] = true })
     end
   
-    log.info (string.format("Illuminating Group %s(%d) to Level %d on Controller: <%s>", name, groupNum, level, controller))
+    local req_url = string.format("http://%s/IlluminateGroup.json",address)
+    local body = string.format("{\"GroupNumber\":%d,\"Intensity\":%d}", groupNum, level)
+
+    log.info (string.format("Illuminating Group %s(%d) to Level %d on Controller: <%s> - URL: <%s> Body: <%s>", name, groupNum, level, address,req_url,body))
   
-    local req_url = string.format("http://%s/IlluminateGroup.json",controller)
+    serialHttpRequestNoReturn(driver, parent, req_url, body)
 
-    local result = http_request('POST',req_url, string.format("{\"GroupNumber\":%d,\"Intensity\":%d}", groupNum, level))
-
-    enumerate_groups(driver, device, controller, true)
   end
 
-  device:set_field('isOn', true, { ['persist'] = true })
-  device:emit_event(capabilities.switch.switch('on'))
 end
 
 local function handle_on(driver, device, command)
   device.thread:queue_event(queued_on, driver, device, command)
 end
 
-local function queued_off(driver, device, command, bypass)
-  local request_delay = device:get_field("RequestDelay")
-  if (request_delay > 0 and bypass == nil) then
-    request_delay = request_delay + 1.2    
-    device:set_field('RequestDelay', request_delay, { ['persist'] = true })
-    log.debug("Delaying handle_Off by " .. request_delay .. " seconds")
-    device.thread:call_with_delay(request_delay,function() queued_off(driver, device, command, true) end )
-    return
-  elseif bypass == nil then
-    request_delay = request_delay + 1.2    
-    device:set_field('RequestDelay', request_delay, { ['persist'] = true })
-  end
+local function queued_off(driver, device, command)
 
-  device.thread:call_with_delay(1.2, function()
-    request_delay = device:get_field("RequestDelay")
-    if (request_delay >= 1.2) then
-      request_delay = request_delay - 1.2
-    else
-      request_delay = 0
-    end
-    device:set_field('RequestDelay', request_delay, { ['persist'] = true })
-    log.debug("request_delay: " .. request_delay)
-  end)
-
-  log.debug (string.format('Off Button: device=<%s>, command=<%s>, delay=<%f>', device, command, request_delay))
+  log.debug (string.format('Off Button: device=<%s>, command=<%s>', device, json.encode(command)))
 
   if device.model == "luxor-group" then
+    local parent = device:get_parent_device()
 
-    local name = device:get_field('Name')
-    local groupNum = device:get_field('Num')
-    local controller = device:get_field("Controller")
+    local name = device.label
+    local groupNum = device:get_field('group')
+    local address = parent.preferences.controller
 
-    log.info (string.format("Illuminating Group %s(%d) to Level %d on Controller: <%s>", name, groupNum, 0, controller))
+    local req_url = string.format("http://%s/IlluminateGroup.json",address)
+    local body = string.format("{\"GroupNumber\":%d,\"Intensity\":%d}", groupNum, 0)
+
+    log.info (string.format("Illuminating Group %s(%d) to Level %d on Controller: <%s> - URL: <%s> Body: <%s>", name, groupNum, 0, address,req_url,body))
   
-    local req_url = string.format("http://%s/IlluminateGroup.json",controller)
+    serialHttpRequestNoReturn(driver, parent, req_url, body)
 
-    local result = http_request('POST',req_url, string.format("{\"GroupNumber\":%d,\"Intensity\":%d}", groupNum, 0))
-
-    enumerate_groups(driver, device, controller, true)
   end
-
-  device:set_field('isOn', false, { ['persist'] = true })
-  device:emit_event(capabilities.switch.switch('off'))
 
 end
 
@@ -581,21 +583,12 @@ end
 
 local function queued_set_level(driver, device, command)
 
-  local request_delay = device:get_field("RequestDelay")
-
-  log.debug (string.format('Set Level: device=<%s>, Model: <%s>, Level: <%d>, Delay: <%f>', device, device.model,command.args.level, request_delay))
+  log.debug (string.format('Set Level: device=<%s>, Model: <%s>, Level: <%d>', device, device.model,command.args.level))
   
-  device:set_field('Level', command.args.level, { ['persist'] = true })
-
   if command.args.level == 0 then
-    device:emit_event(capabilities.switchLevel.level(0))
-    device:emit_event(capabilities.switch.switch('off'))
-
     handle_off(driver, device, command)
   else
-    device:emit_event(capabilities.switchLevel.level(command.args.level))
-    device:emit_event(capabilities.switch.switch('on'))
-
+    device:set_field('switchLevel', command.args.level, { ['persist'] = true })
     handle_on(driver, device, command)
   end
 
@@ -610,28 +603,19 @@ local function handle_refresh(driver, device, command)
   log.debug (string.format('Refresh: device=<%s>, Model: <%s>, Args=<%s>', device, device.model, json.encode(command)))
 
   if device.model == "luxor-controller" and device.preferences.controller ~= '192.168.1.xxx' then
-    enumerate_groups(driver, device, device.preferences.controller, true)
+    timerFunction(driver,device)
   end
 
   if device.model == "luxor-group" then
+    local parent = device:get_parent_device()
 
-    local timeSince = os.difftime(os.time(),driver.lastRefresh)
-
-    log.debug(string.format("Refresh Group: <%s> -- Controller: <%s> -- time:<%s> lastRefresh:<%s> diff:<%d>", device.device_network_id, device:get_field("Controller"),
-    os.time(), driver.lastRefresh, timeSince ))
-
-    if timeSince >=3 then
-      enumerate_groups(driver, device, device:get_field("Controller"), true)
-    end
-
+    timerFunction(driver,parent)
   end
 
 end
 
 local function handle_pushed(driver, device, command, bypass)
   
-  local request_delay
-
   log.debug (string.format('Button Pushed: device=<%s>, command=<%s>', device, json.encode(command)))
 
   log.debug (string.format('Button Pushed: name=<%s>, device label: <%s> profilename=<%s>, profileid=<%s>, component=<%s>', 
@@ -641,85 +625,23 @@ local function handle_pushed(driver, device, command, bypass)
     device.st_store.profile.id,
     command.component))
 
-  if device.label == 'Luxor Controller Factory' then
-      log.debug ("Spawning new Controller")
-    create_controller(driver)
-  end
-
   if command.component == 'allOn' and device.model == "luxor-controller" and device.preferences.controller ~= '192.168.1.xxx' then
 
-    request_delay = device:get_field("RequestDelay")
-    
-    if (request_delay > 0 and bypass == nil) then
-      request_delay = request_delay + 1.2    
-      device:set_field('RequestDelay', request_delay, { ['persist'] = true })
-      log.debug("Delaying allOn by " .. request_delay .. " seconds")
-      device.thread:call_with_delay(request_delay,function() handle_pushed(driver, device, command, true) end )
-      return
-    elseif bypass == nil then
-      request_delay = request_delay + 1.2    
-      device:set_field('RequestDelay', request_delay, { ['persist'] = true })
-    end
-
-    device.thread:call_with_delay(1.2, function()
-      request_delay = device:get_field("RequestDelay")
-      if (request_delay >= 1.2) then
-        request_delay = request_delay - 1.2
-      else
-        request_delay = 0
-      end
-      device:set_field('RequestDelay', request_delay, { ['persist'] = true })
-      log.debug("request_delay: " .. request_delay)
-    end)
-
-    log.info ("Illuminating All Groups on Controller: <%s>", device.preferences.controller)
-
     local req_url = string.format("http://%s/IlluminateAll.json",device.preferences.controller)
-
-    local result = http_request('POST',req_url)
-
-    enumerate_groups(driver, device, device.preferences.controller, true)
-
+    log.info(string.format("Illuminating All Groups on Controller: <%s> -- URL: <%s>", device.preferences.controller, req_url))
+    
+    serialHttpRequestNoReturn(driver, device, req_url)
   end
 
   if command.component == 'allOff' and device.model == "luxor-controller" and device.preferences.controller ~= '192.168.1.xxx'  then
 
-    request_delay = device:get_field("RequestDelay")
-
-    if (request_delay > 0 and bypass == nil) then
-      request_delay = request_delay + 1.2    
-      device:set_field('RequestDelay', request_delay, { ['persist'] = true })
-      log.debug("Delaying allOff by " .. request_delay .. " seconds")
-      device.thread:call_with_delay(request_delay,function() handle_pushed(driver, device, command, true) end )
-      return
-    elseif bypass == nil then
-      request_delay = request_delay + 1.2    
-      device:set_field('RequestDelay', request_delay, { ['persist'] = true })
-    end
-
-    device.thread:call_with_delay(1.2, function()
-      request_delay = device:get_field("RequestDelay")
-      if (request_delay >= 1.2) then
-        request_delay = request_delay - 1.2
-      else
-        request_delay = 0
-      end
-      device:set_field('RequestDelay', request_delay, { ['persist'] = true })
-      log.debug("request_delay: " .. request_delay)
-    end)
-
-    log.info ("Extinguising All Groups on Controller: <%s>", device.preferences.controller)
-
     local req_url = string.format("http://%s/ExtinguishAll.json",device.preferences.controller)
+    log.info(string.format("Extinguising All Groups on Controller: <%s> -- URL: <%s>", device.preferences.controller,req_url))
 
-    local result = http_request('POST',req_url)
-
-    enumerate_groups(driver, device, device.preferences.controller, true)
+    serialHttpRequestNoReturn(driver, device, req_url)
 
   end
-
 end
-
 
 -- ****************************************
 -- *
@@ -728,46 +650,9 @@ end
 -- ****************************************
 
 -- Lifecycle handler to initialize existing devices AND newly discovered devices
-local function device_init(driver, device)
+local function device_init(driver, device, args)
 
-  log.debug(device.id .. ": " .. device.device_network_id .. "> INITIALIZING")
-
-  log.debug(string.format("Device Label: <%s> Model: <%s> Network Id: <%s>", device.label, device.model, device.device_network_id))
-
-  driver:record_netId(device)
-
-  if device.model == "luxor-controller" then
-    local refreshTimer = device.thread:call_on_schedule(1200, 
-      function()
-
-        local timeSince = os.difftime(os.time(),driver.lastRefresh)
-
-        log.debug(string.format("Controller Refresh Timer: <%s> -- Controller: <%s> -- time:<%s> lastRefresh:<%s> diff:<%d>", 
-          device.device_network_id, device.preferences.controller,
-          os.time(), driver.lastRefresh, timeSince ))
-
-        if timeSince >=2 and device.preferences.controller ~= '192.168.1.xxx' then
-          enumerate_groups(driver, device, device.preferences.controller, true)
-        end
-
-      end,
-      'refreshTimer')
-
-      device:set_field('timer',refreshTimer)
-
-      log.debug("Created Refresh Timer With Cycle of 1200 seconds")
-  end
-
-  if device.model == "luxor-group" then
-    driver:rehydrate_group_switch(driver)
-
-    local level = device:get_field('Level')
-    local isOn = device:get_field('isOn')
-
-    log.debug(string.format("Device isOn: <%s> Level: <%s> Network Id: <%s>", isOn, level, device.device_network_id))
-  end
-
-  log.debug('Exiting device initialization')
+  log.debug(string.format("Device Initialization - Id: <%s> Network Id: <%s> Model: <%s> Label: <%s> Args: <%s>",device.id, device.device_network_id, device.model, device.label, args))
 
 end
 
@@ -775,55 +660,43 @@ end
 -- Called when device was just created in SmartThings
 local function device_added (driver, device)
 
-  log.info(device.id .. ": " .. device.device_network_id .. "> ADDED")
+  log.debug(string.format("Device Added - Id: <%s> Network Id: <%s> Model: <%s> Label: <%s>",device.id, device.device_network_id, device.model, device.label))
 
-  log.debug(string.format("Added device network id: %s", device.device_network_id))
-
-  if device.model == "luxor-group" then
+  device:online()
     
-    log.debug(string.format("Added device is a group switch"))
-
-    local controllerAddress, name, groupNum, level = driver:group_switch_from_netId(device.device_network_id)
-  
-    log.debug(string.format("Setting device storage: Name:%s Num:%s Level:%s Controller:%s", name, groupNum, level, controllerAddress))
-  
-    device:set_field('Name', name, { ['persist'] = true })
-    device:set_field('Num', groupNum, { ['persist'] = true })
-    device:set_field('Level', level, { ['persist'] = true })
-    device:set_field('Controller', controllerAddress, { ['persist'] = true })
-    device:set_field('PendingRequest', false, { ['persist'] = true })
-    device:set_field('RequestDelay', 0, { ['persist'] = true })
-  
-    device:emit_event(capabilities.switchLevel.level(level))
-
-    if level == 0 then
-      device:emit_event(capabilities.switch.switch('off'))
-    else
-      device:emit_event(capabilities.switch.switch('on'))
-    end
-  
-    device:online()
-    driver.initialized = true
-
-  end
-
-  if device.model == "luxor-controller" then
-    device:online()
-    driver.initialized = true
-  end
-
-  if device.model == "luxor-factory" then
-    device:online()
-    driver.initialized = true
-  end
+  initializeDriver(driver)
 
 end
 
 
 -- Called when SmartThings thinks the device needs provisioning
-local function device_doconfigure (_, device)
+local function device_doconfigure (driver, device)
+  
+  log.debug(string.format("Device doConfigure - Id: <%s> Network Id: <%s> Model: <%s> Label: <%s>",device.id, device.device_network_id, device.model, device.label))
 
-log.info ('Device doConfigure lifecycle invoked')
+  if device.model == "luxor-controller" then
+    local refreshRate = device.preferences.refreshRate
+
+    local existingTimer = device:get_field("timer")
+    
+    if (existingTimer ~= nil) then
+      log.debug(string.format("Canceling Existing Controller Timer"))
+
+      local status, result = pcall(device.thread.cancel_timer,existingTimer)
+
+      log.debug(string.format("Cancelation result: %s",status))
+    end
+
+    local refreshTimer = device.thread:call_on_schedule(refreshRate, function() timerFunction(driver,device) end, 'refreshTimer')
+
+    device:set_field('timer',refreshTimer)
+
+    log.debug(string.format("Created Refresh Timer With Cycle of <%d> seconds",refreshRate))
+
+    log.info ('Calling Timer function because of Controller doConfigure event.')
+    
+    timerFunction(driver,device)
+  end
 
 end
 
@@ -831,22 +704,17 @@ end
 -- Called when device was deleted via mobile app
 local function device_removed(driver, device)
 
-  log.warn(device.id .. ": " .. device.device_network_id .. "> removed")
+  log.warn(string.format("Device Removed - Id: <%s> Network Id: <%s> Model: <%s> Label: <%s>",device.id, device.device_network_id, device.model, device.label))
 
   if device.model == "luxor-controller" then
     local refreshTimer = device:get_field('timer')
 
-    log.debug("Canceling Timer: %s", refreshTimer)
+    log.debug(string.format("Canceling Controller Timer"))
 
-    device.thread:cancel_timer(refreshTimer)
-  end
+    local status, result = pcall(device.thread.cancel_timer,refreshTimer)
 
-  driver:remove_netId(device.device_network_id)
+    log.debug(string.format("Cancelation result: %s",status))
 
-  local device_list = driver:get_devices()
-  if #device_list == 0 then
-    log.warn ('All devices removed')
-    driver.initialized = false
   end
 
 end
@@ -854,28 +722,29 @@ end
 
 local function handler_driverchanged(driver, device, event, args)
 
-  log.debug ('*** Driver changed handler invoked *** - ' .. device:pretty_print() .. ' - event:' .. json.encode(event) .. ' - args:' .. json.encode(args))
-
   local device_list = driver:get_devices()
 
-  driver.initialized = (#device_list > 0)
+  log.debug (string.format('*** Driver changed handler invoked *** - Device Count: <%d> Event: <%s> Args: <%s> Device: <%s>',#device_list, json.encode(event),json.encode(args),device:pretty_print()))
+
+  initializeDriver(driver,(#device_list > 0))
 
 end
 
 
 local function shutdown_handler(driver, event)
-
-  log.debug ('*** Driver shutdown invoked *** - ' .. json.encode(event))
-
+  
   local device_list = driver:get_devices()
 
-  driver.initialized = (#device_list > 0)
+  log.debug (string.format('*** Driver shutdown invoked *** - Device Count: <%d> Event: <%s>',#device_list, json.encode(event)))
+
+  initializeDriver(driver,(#device_list > 0))
 end
 
 
 local function handler_infochanged (driver, device, event, args)
 
   log.debug ('Info changed handler invoked - ' .. device:pretty_print())
+  local refreshNeeded = false
 
   -- Did preferences change?
   if device.model == "luxor-controller" and args.old_st_store.preferences then
@@ -884,18 +753,45 @@ local function handler_infochanged (driver, device, event, args)
       log.info ('controller address changed to: ', device.preferences.controller)
       
       if (device.preferences.controller ~= '192.168.1.xxx' and validate_ip_address(device.preferences.controller)) then
-        enumerate_groups(driver, device, device.preferences.controller)
+        refreshNeeded = true
       end
+    end
+    
+    if args.old_st_store.preferences.refreshRate ~= device.preferences.refreshRate then
+      log.info ('Refresh Rate changed to: ', device.preferences.refreshRate)
+
+      local refreshTimer = device:get_field('timer')
+
+      log.debug(string.format("Canceling Controller Timer"))
+
+      local status, result = pcall(device.thread.cancel_timer,refreshTimer)
+
+      log.debug(string.format("Cancelation result: %s",status))
+
+      local newRefreshTimer = device.thread:call_on_schedule(device.preferences.refreshRate,
+        function()        
+          timerFunction(driver, device) 
+        end,
+        'refreshTimer')
+
+      device:set_field('timer',newRefreshTimer)
+
+      log.debug(string.format("Created Refresh Timer With Cycle of %d seconds",device.preferences.refreshRate))
+      
+      refreshNeeded = true
     end
 
     if args.old_st_store.preferences.duplicate == true and device.preferences.duplicate == false then
       create_controller(driver)
     end
 
+    if refreshNeeded then
+      timerFunction(driver,device)
+    end
+
   end
 
 end
-
 
 -- ****************************************
 -- *
@@ -934,73 +830,9 @@ local luxor_controller_template = {
     [capabilities.refresh.ID] = {
       [capabilities.refresh.commands.refresh.NAME] = handle_refresh
     }
-  },
-  initialized = false,
-  device_from_netId = function(self, networkId)
-    if self.datastore.device_network_id == nil then return nil end
-    local deviceId = self.datastore.netId_to_deviceId[networkId]
-    if not deviceId then return nil end
-    return self:get_device_info(deviceId)
-  end,
-  record_netId = function(self,device)
-    local netId = device.device_network_id
-    local deviceId = device.id
-    if (self.datastore["netId_to_deviceId"] == nil) then
-      self.datastore["netId_to_deviceId"] = {}
-      self.datastore.netId_to_deviceId[netId] = deviceId
-    elseif (self.datastore.netId_to_deviceId[netId] == nil or self.datastore.netId_to_deviceId[netId] ~= deviceId) then
-      self.datastore.netId_to_deviceId[netId] = deviceId
-    end
-  end,
-  remove_netId = function(self,networkId)
-    if self.datastore.device_network_id == nil then return end
-    self.datastore.netId_to_deviceId[networkId] = nil
-  end,
-  fill_group_switch_cache = function(self, netId, controllerAddress, name, groupNum, level)
-    if (self.datastore["group_switch_cache"] == nil) then
-      self.datastore["group_switch_cache"] = {}
-    end
-
-    log.debug(string.format("Storing group switch cache info: NetId:<%s> Controller:<%s> Name:<%s> Group:<%d> Level:<%s>",
-      netId, controllerAddress, name, groupNum, level))
-
-    self.datastore.group_switch_cache[netId] = {}
-    self.datastore.group_switch_cache[netId]["Controller"] = controllerAddress
-    self.datastore.group_switch_cache[netId]["Name"] = name
-    self.datastore.group_switch_cache[netId]["Num"] = groupNum
-    self.datastore.group_switch_cache[netId]["Level"] = level
-  end,
-  group_switch_from_netId = function(self, netId)
-    if self.datastore.group_switch_cache[netId] == nil then return nil end
-
-    local controllerAddress = self.datastore.group_switch_cache[netId]["Controller"]
-    local name = self.datastore.group_switch_cache[netId]["Name"]
-    local groupNum = self.datastore.group_switch_cache[netId]["Num"]
-    local level = self.datastore.group_switch_cache[netId]["Level"]
-
-    return controllerAddress, name, groupNum, level
-  end,
-  rehydrate_group_switch = function (self, device)
-    if device.device_network_id == nil then return nil end
-
-    local controllerAddress = device:get_field('Controller');
-    local name = device:get_field('Name');
-    local groupNum = device:get_field('Num');
-    local level = device:get_field('Level');
-
-    self:fill_group_switch_cache(device.device_network_id, controllerAddress, name, groupNum, level)
-  end,
-  lastRefresh = os.time()
+  }
 }
 
 luxor_driver = Driver("Luxor Controller", luxor_controller_template)
-
-if luxor_driver.datastore["group_switch_cache"] == nil then
-  luxor_driver.datastore["group_switch_cache"] = {}
-end
-
-if luxor_driver.datastore["netId_to_deviceId"] == nil then
-  luxor_driver.datastore["netId_to_deviceId"] = {}
-end
 
 luxor_driver:run()
