@@ -13,5 +13,8 @@ There is no SLA for bugs/issues/responses.
 I am _using_ this driver however at home, so it "works" for us.
 That's the level of testing it has gone through, we control some limited groups, and we do not have any colors on our controller.
 
+If you would like to use this driver on your own smartthings hub. You can subscribe to it here:<br>
+https://bestow-regional.api.smartthings.com/invite/Pw2DWb8bGKM3
+
 Please be kind.
 Thanks.
