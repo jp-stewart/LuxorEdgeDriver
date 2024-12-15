@@ -35,6 +35,15 @@ preferences:
       minLength: 7
       maxLength: 15
       default: "192.168.1.xxx"
+  - title: "Polling Refresh Rate"
+    name: refreshRate
+    description: "Polling Refresh Rate (s) -- Actively poll controller for status every X seconds."
+    required: true
+    preferenceType: integer
+    definition:
+      minimum: 30
+      maximum: 86400
+      default: 300
   - title: "Spawn New Controller Device"
     name: duplicate
     description: "Toggle on, and then off to spawn another controller device"
